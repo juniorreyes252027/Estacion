@@ -1,0 +1,8 @@
+build/
+*.o
+*.d
+*.db
+*.db-wal
+*.db-shm
+.env
+.vscode/
