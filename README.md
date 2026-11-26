@@ -59,11 +59,19 @@ $env:ITLA_MATRICULA="<tu-matricula>"
 ./build/estacion descargar         # Nivel 1: descarga las lecturas y responde
 ./build/estacion analizar          # Nivel 2: estadísticas por máquina (solo muestra)
 ./build/estacion analizar enviar   # Nivel 2: las muestra y las envía
-./build/estacion enviar            # Nivel 3: telemetría continua (Ctrl+C para parar)
+./build/estacion enviar            # Nivel 3 y 4: telemetría + latido MQTT cada latido_s (Ctrl+C para parar)
 ./build/estacion lectura           # prueba: guarda 3 lecturas
 ./build/estacion enviar-una        # prueba: envía 1 lectura pendiente
 ./build/estacion limpiar           # borra las lecturas pendientes
 ```
+
+## Latido MQTT (Nivel 4)
+
+Mientras `enviar` corre, cada `latido_s` segundos (10 por defecto, viene de `/config`) publica
+`LATIDO;<seq>;<pendientes>;<ts>` en `itla/estudiantes/<MATRICULA>/latido` con QoS 0.
+Usa libcurl con una URL `mqtt://` (usuario = matrícula, contraseña = token). El latido tiene su
+propio reloj: sale a su hora aunque el HTTP esté esperando por un 503, y si se pierde no se reenvía.
+Requiere la variable `ITLA_MATRICULA`.
 
 ## Base de datos (`estacion.db`)
 
@@ -83,7 +91,7 @@ Todo SQL con datos variables usa sentencias preparadas con `?`.
 
 Este proyecto se desarrolló con la ayuda de **Claude** (asistente de IA de Anthropic).
 La IA se usó para: explicar paso a paso el uso de libcurl y SQLite, proponer la estructura
-en módulos (`datos`, `red`, `sensor`, `comandos`), revisar partes del código C,
+en módulos (`datos`, `red`, `sensor`, `comandos`), escribir y revisar partes del código C,
 el `Makefile` y este README, y ayudar a depurar errores de compilación.
 Yo ejecuté el programa contra el servidor del reto, comprobé los resultados y estoy en
 capacidad de explicar cada parte del código.

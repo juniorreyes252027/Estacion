@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "red.h"
 
 /* libcurl llama a esta funcion cada vez que llega un trozo de respuesta */
@@ -112,6 +113,47 @@ enum Envio red_enviar_lectura(CURL *curl, const char *host, const struct Lectura
     }
     free(resp.datos);
     return resultado;
+}
+
+/* ================= MQTT ================= */
+
+/* Un publicador no espera datos de vuelta: lo que llegue se descarta */
+static size_t descartar(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    (void)ptr;
+    (void)userdata;
+    return size * nmemb;
+}
+
+CURL *red_nuevo_mqtt(const char *matricula, const char *token) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+    curl_easy_setopt(curl, CURLOPT_USERNAME, matricula);
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, token);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L);          /* corto: el bucle no debe quedarse esperando */
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 3L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, descartar);
+    return curl;
+}
+
+int red_publicar_latido(CURL *mqtt, const char *host, const char *matricula,
+                        long long seq, long long pendientes) {
+    char url[256];
+    snprintf(url, sizeof url, "mqtt://%s:1883/itla/estudiantes/%s/latido", host, matricula);
+
+    char mensaje[100];
+    snprintf(mensaje, sizeof mensaje, "LATIDO;%lld;%lld;%lld",
+             seq, pendientes, (long long)time(NULL));
+
+    curl_easy_setopt(mqtt, CURLOPT_URL, url);
+    curl_easy_setopt(mqtt, CURLOPT_POSTFIELDS, mensaje);   /* con POSTFIELDS, libcurl PUBLICA */
+
+    CURLcode res = curl_easy_perform(mqtt);
+    if (res != CURLE_OK) {
+        fprintf(stderr, "Latido no publicado: %s\n", curl_easy_strerror(res));
+        return 0;
+    }
+    return 1;
 }
 
 void red_pausa_ms(int ms) {

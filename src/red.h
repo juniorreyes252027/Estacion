@@ -39,6 +39,16 @@ int red_peticion(CURL *curl, const char *url, const char *json,
 enum Envio red_enviar_lectura(CURL *curl, const char *host, const struct Lectura *l,
                               long *espera, long *codigo);
 
+/* ---- MQTT (Nivel 4: latido) ---- */
+
+/* Handle de libcurl para MQTT. El usuario es la matricula y la contrasena es el token. */
+CURL *red_nuevo_mqtt(const char *matricula, const char *token);
+
+/* Publica LATIDO;<seq>;<pendientes>;<ts> en itla/estudiantes/<MATRICULA>/latido (QoS 0).
+   Devuelve 1 si se publico, 0 si no. No se reintenta ni se encola: un latido perdido se pierde. */
+int red_publicar_latido(CURL *mqtt, const char *host, const char *matricula,
+                        long long seq, long long pendientes);
+
 /* Duerme ms milisegundos (funciona igual en Windows y Linux). */
 void red_pausa_ms(int ms);
 

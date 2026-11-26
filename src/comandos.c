@@ -352,7 +352,8 @@ static void hora_actual(char *salida, size_t n) {
     else    snprintf(salida, n, "--:--:--");
 }
 
-/* Cada intervalo_s genera una lectura y la envia sin perder ninguna.
+/* Nivel 3 y 4: cada intervalo_s genera una lectura y la envia sin perder ninguna;
+   cada latido_s publica un latido MQTT.
    Las lecturas que no se pueden enviar esperan en la tabla telemetria y se
    mandan despues, en orden de seq. Termina con Ctrl+C. */
 int cmd_enviar(void) {
@@ -378,9 +379,26 @@ int cmd_enviar(void) {
         printf("(No hay intervalo_s en la base; uso 5 s. Ejecuta antes: estacion config)\n");
     }
 
+    long latido_s = 10;                    /* cada cuantos segundos va un latido MQTT */
+    if (datos_leer_config(db, "latido_s", texto, sizeof texto)) {
+        long v = strtol(texto, NULL, 10);
+        if (v >= 1) latido_s = v;
+    }
+
+    /* Nivel 4: el latido necesita la matricula (usuario MQTT y parte del topico) */
+    const char *matricula = getenv("ITLA_MATRICULA");
+    CURL *mqtt = NULL;
+    if (matricula) {
+        mqtt = red_nuevo_mqtt(matricula, token);
+    } else {
+        printf("(Falta ITLA_MATRICULA: no se enviaran latidos MQTT)\n");
+    }
+
     sensor_iniciar();
     signal(SIGINT, al_interrumpir);
 
+    time_t proximo_latido = time(NULL);    /* el primer latido sale enseguida */
+    long latidos = 0;
     time_t proxima_lectura = time(NULL);   /* la primera lectura se genera enseguida */
     time_t no_enviar_antes = 0;            /* mientras no llegue esta hora, no se envia */
     int fallos_red = 0;                    /* fallos de red seguidos (para esperar 1, 2, 4... s) */
@@ -446,14 +464,27 @@ int cmd_enviar(void) {
             }
         }
 
-        /* (Aqui se agregara el latido MQTT del Nivel 4) */
+        /* 3. Si toca, publicar el latido MQTT. Va por su cuenta: aunque el HTTP este
+              esperando por un 503, el latido sale a su hora. */
+        if (mqtt && time(NULL) >= proximo_latido) {
+            if (red_publicar_latido(mqtt, host, matricula,
+                                    datos_ultimo_seq(db), datos_contar_pendientes(db))) {
+                latidos++;
+                hora_actual(hora, sizeof hora);
+                printf("[%s] latido #%ld publicado\n", hora, latidos);
+            }
+            time_t ahora2 = time(NULL);
+            proximo_latido += latido_s;                     /* sin acumular retraso */
+            if (proximo_latido <= ahora2) proximo_latido = ahora2 + latido_s;
+        }
 
         red_pausa_ms(250);  /* 4 vueltas por segundo: nunca pasa de 5 peticiones/s */
     }
 
-    printf("\nTerminando. Lecturas enviadas en esta sesion: %ld. Pendientes en la cola: %lld\n",
-           enviadas, datos_contar_pendientes(db));
+    printf("\nTerminando. Lecturas enviadas: %ld. Latidos publicados: %ld. Pendientes en la cola: %lld\n",
+           enviadas, latidos, datos_contar_pendientes(db));
 
+    if (mqtt) curl_easy_cleanup(mqtt);
     curl_slist_free_all(cabeceras);
     curl_easy_cleanup(curl);
     datos_cerrar(db);
