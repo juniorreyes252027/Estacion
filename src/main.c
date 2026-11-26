@@ -13,7 +13,8 @@ static void uso(void) {
         "  lectura           guarda 3 lecturas de prueba\n"
         "  enviar-una        envia una lectura pendiente (prueba)\n"
         "  limpiar           borra las lecturas pendientes\n"
-        "  enviar            telemetria continua (Nivel 3)\n");
+        "  enviar            telemetria continua + latido (Niveles 3 y 4)\n"
+        "  escuchar          recibe y confirma alarmas (Nivel 5)\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -40,6 +41,8 @@ int main(int argc, char *argv[]) {
         resultado = cmd_limpiar();
     else if (strcmp(sub, "enviar") == 0)
         resultado = cmd_enviar();
+    else if (strcmp(sub, "escuchar") == 0)
+        resultado = cmd_escuchar();
     else {
         fprintf(stderr, "Subcomando desconocido: %s\n\n", sub);
         uso();

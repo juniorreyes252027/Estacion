@@ -9,7 +9,7 @@ todo en **SQLite** y envía telemetría de forma resistente a fallos.
 |---|---|
 | `src/main.c` | Lee `argv` y llama al subcomando |
 | `src/comandos.c/.h` | Un subcomando = una función |
-| `src/red.c/.h` | Todo lo de libcurl (HTTP y, más adelante, MQTT) |
+| `src/red.c/.h` | Todo lo de libcurl (HTTP y MQTT) |
 | `src/datos.c/.h` | Todo lo de SQLite (`estacion.db`) |
 | `src/sensor.c/.h` | Sensor simulado (temp 25–45 °C, corriente 2–5 A) |
 | `lib/sqlite/` | SQLite amalgamation (`sqlite3.c`, `sqlite3.h`) |
@@ -60,6 +60,7 @@ $env:ITLA_MATRICULA="<tu-matricula>"
 ./build/estacion analizar          # Nivel 2: estadísticas por máquina (solo muestra)
 ./build/estacion analizar enviar   # Nivel 2: las muestra y las envía
 ./build/estacion enviar            # Nivel 3 y 4: telemetría + latido MQTT cada latido_s (Ctrl+C para parar)
+./build/estacion escuchar          # Nivel 5: recibe, guarda y confirma alarmas (Ctrl+C para parar)
 ./build/estacion lectura           # prueba: guarda 3 lecturas
 ./build/estacion enviar-una        # prueba: envía 1 lectura pendiente
 ./build/estacion limpiar           # borra las lecturas pendientes
@@ -72,6 +73,26 @@ Mientras `enviar` corre, cada `latido_s` segundos (10 por defecto, viene de `/co
 Usa libcurl con una URL `mqtt://` (usuario = matrícula, contraseña = token). El latido tiene su
 propio reloj: sale a su hora aunque el HTTP esté esperando por un 503, y si se pierde no se reenvía.
 Requiere la variable `ITLA_MATRICULA`.
+
+## Alarmas (Nivel 5)
+
+Se usan **dos terminales** en la misma carpeta (comparten `estacion.db`), ambas con las variables de entorno:
+
+```
+./build/estacion enviar      # terminal 1: telemetría y latido
+./build/estacion escuchar    # terminal 2: alarmas
+```
+
+El servidor solo manda alarmas si hubo un latido en los últimos 60 s. Requiere `ITLA_MATRICULA`.
+
+1. `escuchar` se suscribe a `itla/planta/<MATRICULA>/alarma` (MQTT con libcurl).
+2. Cada mensaje `ALARMA;<codigo>;<maquina>;<ts>` se guarda primero en la tabla `alarmas`;
+   los `NINGUNA;<ts>` se ignoran. Una alarma repetida no se duplica.
+3. Se confirma con `POST /api/v1/alarmas/ack` usando un handle HTTP aparte.
+   200 y 409 (ya confirmada) cuentan como éxito; 404 se anota con `ts_ack = -1` y no se reintenta.
+4. Con 503/429 se respeta `Retry-After` (+1 s de margen); sin red se espera 1, 2, 4… hasta 30 s.
+   Los ack pendientes se reintentan aunque se reinicie el programa.
+5. La suscripción se renueva cada 20 s. Si se corta antes de 10 s, reconecta con espera creciente.
 
 ## Base de datos (`estacion.db`)
 

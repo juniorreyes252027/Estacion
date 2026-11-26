@@ -56,4 +56,13 @@ long long datos_contar_pendientes(sqlite3 *db);
 long long datos_ultimo_seq(sqlite3 *db);
 int       datos_borrar_pendientes(sqlite3 *db);       /* devuelve cuantas borro, -1 si falla */
 
+/* ---- tabla alarmas (Nivel 5) ---- */
+/* Guarda una alarma nueva. Devuelve 1 si era nueva, 0 si ya estaba (se ignora), -1 si falla. */
+int  datos_registrar_alarma(sqlite3 *db, const char *codigo, const char *maquina,
+                            long long ts_servidor, long long ts_recibida);
+/* Busca la alarma mas antigua que aun no se confirmo. Devuelve 1 si hay, 0 si no. */
+int  datos_alarma_sin_ack(sqlite3 *db, char *codigo, size_t n);
+/* Marca una alarma como confirmada (ts_ack = hora; -1 si el servidor dice que no existe). */
+void datos_marcar_ack(sqlite3 *db, const char *codigo, long long ts_ack);
+
 #endif

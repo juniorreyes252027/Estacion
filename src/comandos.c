@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include <signal.h>
 #include "comandos.h"
@@ -489,4 +490,182 @@ int cmd_enviar(void) {
     curl_easy_cleanup(curl);
     datos_cerrar(db);
     return abortar ? 1 : 0;
+}
+
+/* ================= Nivel 5: alarmas ================= */
+
+struct Escucha {
+    sqlite3    *db;
+    CURL       *http;            /* handle HTTP aparte: nunca el de la suscripcion */
+    const char *host;
+    time_t      no_ack_antes;    /* mientras no llegue esta hora, no se intenta confirmar */
+    time_t      ultimo_tic;
+    int         fallos_ack;
+    long        recibidas;
+    long        confirmadas;
+};
+
+/* Intenta confirmar la alarma pendiente mas antigua. Devuelve 1 si la confirmo. */
+static int confirmar_una(struct Escucha *e) {
+    if (time(NULL) < e->no_ack_antes) return 0;
+
+    char codigo[32];
+    if (!datos_alarma_sin_ack(e->db, codigo, sizeof codigo)) return 0;
+
+    long espera = 0, http = 0;
+    enum Envio r = red_confirmar_alarma(e->http, e->host, codigo, &espera, &http);
+    char hora[16];
+    hora_actual(hora, sizeof hora);
+
+    switch (r) {
+    case ENVIO_OK:
+        datos_marcar_ack(e->db, codigo, (long long)time(NULL));
+        e->fallos_ack = 0;
+        e->confirmadas++;
+        printf("[%s] alarma %s confirmada (HTTP %ld)\n", hora, codigo, http);
+        return 1;
+    case ENVIO_ESPERAR:
+        e->no_ack_antes = time(NULL) + espera + 1;   /* +1 s de margen */
+        printf("[%s] HTTP %ld: servidor ocupado. Reintento el ack de %s en %ld s\n",
+               hora, http, codigo, espera);
+        break;
+    case ENVIO_RED:
+        e->fallos_ack++;
+        espera = 1L << (e->fallos_ack > 5 ? 5 : e->fallos_ack - 1);   /* 1,2,4,8,16,32 */
+        if (espera > 30) espera = 30;
+        e->no_ack_antes = time(NULL) + espera;
+        printf("[%s] Sin conexion. Reintento el ack de %s en %ld s\n", hora, codigo, espera);
+        break;
+    case ENVIO_RECHAZADA:
+        if (http == 404) {                       /* no existe: no tiene sentido insistir */
+            datos_marcar_ack(e->db, codigo, -1);
+            printf("[%s] alarma %s: el servidor dice que no existe (404)\n", hora, codigo);
+        } else {
+            e->no_ack_antes = time(NULL) + 30;
+        }
+        break;
+    }
+    return 0;
+}
+
+/* Llega un mensaje del topico de alarmas: ALARMA;<codigo>;<maquina>;<ts> o NINGUNA;<ts> */
+static void al_mensaje(const char *topico, size_t tlen, char *carga, void *ctx) {
+    (void)topico;
+    (void)tlen;
+    struct Escucha *e = (struct Escucha *)ctx;
+
+    size_t n = strlen(carga);
+    if (n > 0 && carga[n - 1] == '\r') carga[n - 1] = '\0';
+    if (strncmp(carga, "ALARMA;", 7) != 0) return;     /* NINGUNA;<ts> y lo demas se ignora */
+
+    char *codigo  = carga + 7;
+    char *punto1  = strchr(codigo, ';');
+    if (!punto1) return;
+    *punto1 = '\0';
+    char *maquina = punto1 + 1;
+    char *punto2  = strchr(maquina, ';');
+    if (!punto2) return;
+    *punto2 = '\0';
+    long long ts_servidor = strtoll(punto2 + 1, NULL, 10);
+
+    /* El codigo se mete en un JSON: solo se aceptan letras y numeros */
+    size_t largo = strlen(codigo);
+    if (largo == 0 || largo > 30) return;
+    for (size_t i = 0; i < largo; i++)
+        if (!isalnum((unsigned char)codigo[i])) return;
+
+    int nueva = datos_registrar_alarma(e->db, codigo, maquina,
+                                       ts_servidor, (long long)time(NULL));
+    if (nueva < 0) return;
+    if (nueva) {
+        char hora[16];
+        hora_actual(hora, sizeof hora);
+        e->recibidas++;
+        printf("[%s] alarma %s en %s recibida\n", hora, codigo, maquina);
+    }
+    /* Si ya estaba confirmada (el broker la reenvio) no queda nada pendiente */
+    for (int i = 0; i < 5 && confirmar_una(e); i++) { }
+}
+
+/* libcurl la llama cerca de una vez por segundo mientras escucha */
+static int debe_parar(void *ctx) {
+    struct Escucha *e = (struct Escucha *)ctx;
+    time_t ahora = time(NULL);
+    if (ahora != e->ultimo_tic) {                /* una vez por segundo basta */
+        e->ultimo_tic = ahora;
+        confirmar_una(e);                        /* reintenta acks que fallaron antes */
+    }
+    return terminar;
+}
+
+/* Nivel 5: se suscribe a las alarmas, las guarda y las confirma por HTTP.
+   Si la suscripcion se cae, reconecta con espera creciente. Termina con Ctrl+C. */
+int cmd_escuchar(void) {
+    const char *host, *token;
+    if (leer_entorno(&host, &token) != 0) return 1;
+    const char *matricula = getenv("ITLA_MATRICULA");
+    if (!matricula) {
+        fprintf(stderr, "Falta la variable ITLA_MATRICULA\n");
+        return 1;
+    }
+
+    sqlite3 *db = datos_abrir();
+    if (!db) return 1;
+
+    struct curl_slist *cabeceras = NULL;
+    CURL *http = red_nuevo_cliente(token, &cabeceras);
+    CURL *sub  = red_nuevo_suscriptor(matricula, token);
+    if (!http || !sub) {
+        if (http) curl_easy_cleanup(http);
+        if (sub) curl_easy_cleanup(sub);
+        curl_slist_free_all(cabeceras);
+        datos_cerrar(db);
+        return 1;
+    }
+
+    struct Escucha e = { db, http, host, 0, 0, 0, 0, 0 };
+    struct Mqtt m;
+    memset(&m, 0, sizeof m);
+    m.al_mensaje = al_mensaje;
+    m.debe_parar = debe_parar;
+    m.ctx = &e;
+
+    signal(SIGINT, al_interrumpir);
+    printf("Escuchando alarmas en itla/planta/%s/alarma. Ctrl+C para terminar.\n", matricula);
+    printf("(Recuerda tener 'enviar' corriendo en otra terminal: el servidor solo manda\n"
+           " alarmas si hay un latido en los ultimos 60 s.)\n");
+
+    while (confirmar_una(&e)) { }                /* acks que quedaron pendientes de antes */
+
+    int fallos = 0;
+    while (!terminar) {
+        time_t inicio = time(NULL);
+        red_escuchar(sub, host, matricula, &m);
+        if (terminar) break;
+
+        /* Cada 20 s la conexion se reinicia a proposito; una que dura 10 s o mas es sana.
+           Si se cae antes (incluye el timeout de conexion de 5 s), se espera
+           1, 2, 4... hasta 30 s. */
+        if (time(NULL) - inicio >= 10) fallos = 0;
+        else fallos++;
+
+        if (fallos > 0) {
+            long espera = 1L << (fallos > 5 ? 5 : fallos - 1);
+            if (espera > 30) espera = 30;
+            printf("Suscripcion cortada. Reconecto en %ld s.\n", espera);
+            for (long ms = 0; ms < espera * 1000 && !terminar; ms += 250) {
+                confirmar_una(&e);
+                red_pausa_ms(250);
+            }
+        }
+    }
+
+    printf("\nTerminando. Alarmas recibidas: %ld. Confirmadas: %ld.\n",
+           e.recibidas, e.confirmadas);
+
+    curl_easy_cleanup(sub);
+    curl_easy_cleanup(http);
+    curl_slist_free_all(cabeceras);
+    datos_cerrar(db);
+    return 0;
 }

@@ -365,3 +365,60 @@ int datos_borrar_pendientes(sqlite3 *db) {
     }
     return sqlite3_changes(db);
 }
+
+/* ================= tabla alarmas ================= */
+
+/* INSERT OR IGNORE: si la alarma ya estaba (el broker la reenvia al reconectar),
+   no se duplica ni se pisa su ts_ack. */
+int datos_registrar_alarma(sqlite3 *db, const char *codigo, const char *maquina,
+                           long long ts_servidor, long long ts_recibida) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "INSERT OR IGNORE INTO alarmas (codigo, maquina, ts_servidor, ts_recibida) "
+            "VALUES (?, ?, ?, ?);", -1, &st, NULL) != SQLITE_OK) {
+        fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, codigo, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, maquina, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 3, ts_servidor);
+    sqlite3_bind_int64(st, 4, ts_recibida);
+    int paso = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (paso != SQLITE_DONE) {
+        fprintf(stderr, "Error guardando alarma: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    return sqlite3_changes(db) > 0 ? 1 : 0;
+}
+
+int datos_alarma_sin_ack(sqlite3 *db, char *codigo, size_t n) {
+    sqlite3_stmt *st = NULL;
+    int hay = 0;
+    if (sqlite3_prepare_v2(db,
+            "SELECT codigo FROM alarmas WHERE ts_ack IS NULL "
+            "ORDER BY ts_recibida LIMIT 1;", -1, &st, NULL) != SQLITE_OK) {
+        fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(db));
+        return 0;
+    }
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        snprintf(codigo, n, "%s", (const char *)sqlite3_column_text(st, 0));
+        hay = 1;
+    }
+    sqlite3_finalize(st);
+    return hay;
+}
+
+void datos_marcar_ack(sqlite3 *db, const char *codigo, long long ts_ack) {
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "UPDATE alarmas SET ts_ack = ? WHERE codigo = ?;",
+                           -1, &st, NULL) != SQLITE_OK) {
+        fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(db));
+        return;
+    }
+    sqlite3_bind_int64(st, 1, ts_ack);
+    sqlite3_bind_text(st, 2, codigo, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) != SQLITE_DONE)
+        fprintf(stderr, "Error marcando ack: %s\n", sqlite3_errmsg(db));
+    sqlite3_finalize(st);
+}

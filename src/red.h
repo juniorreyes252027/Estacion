@@ -49,6 +49,31 @@ CURL *red_nuevo_mqtt(const char *matricula, const char *token);
 int red_publicar_latido(CURL *mqtt, const char *host, const char *matricula,
                         long long seq, long long pendientes);
 
+/* ---- MQTT (Nivel 5: alarmas) ---- */
+
+/* Lo que llega por la suscripcion, mensaje por mensaje. */
+struct Mqtt {
+    char   buf[4096];       /* bytes recibidos que aun no forman un mensaje completo */
+    size_t len;
+    /* Se llama por cada mensaje completo. carga es el texto, sin el '\n' final. */
+    void (*al_mensaje)(const char *topico, size_t tlen, char *carga, void *ctx);
+    /* Se llama cerca de una vez por segundo; si devuelve algo distinto de 0, se corta. */
+    int  (*debe_parar)(void *ctx);
+    void  *ctx;
+};
+
+/* Handle de libcurl para suscribirse. Usuario = matricula, contrasena = token. */
+CURL *red_nuevo_suscriptor(const char *matricula, const char *token);
+
+/* Se suscribe a itla/planta/<MATRICULA>/alarma y se queda escuchando.
+   Regresa cuando la conexion se corta, pasan 20 s (reconexion normal) o debe_parar
+   dice que pare. Devuelve el CURLcode. */
+int red_escuchar(CURL *sub, const char *host, const char *matricula, struct Mqtt *m);
+
+/* POST /api/v1/alarmas/ack con {"codigo":"..."}. 200 y 409 (ya confirmada) = ENVIO_OK. */
+enum Envio red_confirmar_alarma(CURL *curl, const char *host, const char *codigo,
+                                long *espera, long *codigo_http);
+
 /* Duerme ms milisegundos (funciona igual en Windows y Linux). */
 void red_pausa_ms(int ms);
 

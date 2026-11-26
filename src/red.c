@@ -156,6 +156,104 @@ int red_publicar_latido(CURL *mqtt, const char *host, const char *matricula,
     return 1;
 }
 
+/* ---- suscripcion ---- */
+
+/* libcurl entrega cada mensaje como: 2 bytes con el largo del topico (el byte alto primero),
+   el topico, y el contenido, que en este reto termina en '\n'. Pueden llegar varios mensajes
+   pegados, o uno partido en dos llamadas, asi que se acumulan en m->buf. */
+static size_t al_recibir_mqtt(char *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t n = size * nmemb;
+    struct Mqtt *m = (struct Mqtt *)userdata;
+
+    if (n > sizeof m->buf - m->len) {           /* no cabe: se descarta lo acumulado */
+        m->len = 0;
+        if (n > sizeof m->buf) return n;
+    }
+    memcpy(m->buf + m->len, ptr, n);
+    m->len += n;
+
+    for (;;) {                                   /* procesa todos los mensajes completos */
+        if (m->len < 2) break;
+        size_t tlen = ((size_t)(unsigned char)m->buf[0] << 8) | (unsigned char)m->buf[1];
+        if (m->len < 2 + tlen) break;
+        char *carga = m->buf + 2 + tlen;
+        char *fin = memchr(carga, '\n', m->len - 2 - tlen);
+        if (!fin) break;                         /* el mensaje aun no llego entero */
+        *fin = '\0';
+        if (m->al_mensaje) m->al_mensaje(m->buf + 2, tlen, carga, m->ctx);
+        size_t usado = (size_t)(fin - m->buf) + 1;
+        memmove(m->buf, m->buf + usado, m->len - usado);
+        m->len -= usado;
+    }
+    return n;
+}
+
+/* libcurl la llama cada cierto tiempo durante la conexion. Devolver 1 corta la conexion. */
+static int al_progreso(void *userdata, curl_off_t dltotal, curl_off_t dlnow,
+                       curl_off_t ultotal, curl_off_t ulnow) {
+    (void)dltotal; (void)dlnow; (void)ultotal; (void)ulnow;
+    struct Mqtt *m = (struct Mqtt *)userdata;
+    return (m->debe_parar && m->debe_parar(m->ctx)) ? 1 : 0;
+}
+
+CURL *red_nuevo_suscriptor(const char *matricula, const char *token) {
+    CURL *curl = curl_easy_init();
+    if (!curl) return NULL;
+    curl_easy_setopt(curl, CURLOPT_USERNAME, matricula);
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, token);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);   /* red de seguridad: se reconecta cada 20 s */
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, al_recibir_mqtt);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, al_progreso);
+    return curl;
+}
+
+int red_escuchar(CURL *sub, const char *host, const char *matricula, struct Mqtt *m) {
+    char url[256];
+    snprintf(url, sizeof url, "mqtt://%s:1883/itla/planta/%s/alarma", host, matricula);
+
+    m->len = 0;
+    curl_easy_setopt(sub, CURLOPT_URL, url);
+    curl_easy_setopt(sub, CURLOPT_WRITEDATA, m);
+    curl_easy_setopt(sub, CURLOPT_XFERINFODATA, m);
+
+    CURLcode res = curl_easy_perform(sub);
+    if (res != CURLE_OK && res != CURLE_OPERATION_TIMEDOUT && res != CURLE_ABORTED_BY_CALLBACK)
+        fprintf(stderr, "Suscripcion: %s\n", curl_easy_strerror(res));
+    return (int)res;
+}
+
+enum Envio red_confirmar_alarma(CURL *curl, const char *host, const char *codigo,
+                                long *espera, long *codigo_http) {
+    char url[256];
+    snprintf(url, sizeof url, "http://%s:4000/api/v1/alarmas/ack", host);
+
+    char json[96];
+    snprintf(json, sizeof json, "{\"codigo\":\"%s\"}", codigo);
+
+    struct Buffer resp = { NULL, 0 };
+    long retry = 0;
+    enum Envio resultado;
+
+    *codigo_http = 0;
+    if (red_peticion(curl, url, json, codigo_http, &resp, &retry) != 0) {
+        resultado = ENVIO_RED;
+    } else if (*codigo_http == 200 || *codigo_http == 409) {
+        resultado = ENVIO_OK;                    /* 409 = ya estaba confirmada */
+    } else if (*codigo_http == 503 || *codigo_http == 429) {
+        *espera = retry > 0 ? retry : 5;
+        resultado = ENVIO_ESPERAR;
+    } else {
+        fprintf(stderr, "El servidor rechazo el ack de %s (HTTP %ld): %s\n",
+                codigo, *codigo_http, resp.datos ? resp.datos : "");
+        resultado = ENVIO_RECHAZADA;
+    }
+    free(resp.datos);
+    return resultado;
+}
+
 void red_pausa_ms(int ms) {
     CURLM *m = curl_multi_init();
     if (!m) return;
